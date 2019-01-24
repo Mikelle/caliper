@@ -32,6 +32,7 @@ const testUtil = require('./util.js');
 const signedOffline = require('./signTransactionOffline.js');
 
 let ORGS;
+let isChannelEventHub = false;
 
 let tx_id = null;
 let the_user = null;
@@ -48,6 +49,10 @@ let clientIndex = 0;
  */
 function init(config_path) {
     ORGS = commUtils.parseYaml(config_path).fabric.network;
+    const info = commUtils.parseYaml(config_path).info;
+    if (info.Version === '1.3.0' || info.Version === '1.4.0') {
+        isChannelEventHub = true;
+    }
 }
 module.exports.init = init;
 
@@ -318,23 +323,30 @@ async function instantiateChaincode(chaincode, endorsement_policy, upgrade){
                     if(org === userOrg && !eventPeer) {
                         eventPeer = key;
                     }
+                    if (isChannelEventHub) {
+                        let eh = channel.newChannelEventHub(peer);
+                        eh.connect();
+                        eventhubs.push(eh);
+                    }
                 }
             }
         }
     }
 
-    // an event listener can only register with a peer in its own org
-    data = fs.readFileSync(commUtils.resolvePath(ORGS[userOrg][eventPeer].tls_cacerts));
-    let eh = client.newEventHub();
-    eh.setPeerAddr(
-        ORGS[userOrg][eventPeer].events,
-        {
-            pem: Buffer.from(data).toString(),
-            'ssl-target-name-override': ORGS[userOrg][eventPeer]['server-hostname']
-        }
-    );
-    eh.connect();
-    eventhubs.push(eh);
+    if (!isChannelEventHub) {
+        // an event listener can only register with a peer in its own org
+        data = fs.readFileSync(commUtils.resolvePath(ORGS[userOrg][eventPeer].tls_cacerts));
+        let eh = client.newEventHub();
+        eh.setPeerAddr(
+            ORGS[userOrg][eventPeer].events,
+            {
+                pem: Buffer.from(data).toString(),
+                'ssl-target-name-override': ORGS[userOrg][eventPeer]['server-hostname']
+            }
+        );
+        eh.connect();
+        eventhubs.push(eh);
+    }
 
     try {
         // read the config block from the orderer for the channel
@@ -381,7 +393,7 @@ async function instantiateChaincode(chaincode, endorsement_policy, upgrade){
             let one_good = false;
             if (proposalResponses[i].response && proposalResponses[i].response.status === 200) {
                 one_good = true;
-            /*} else if (proposalResponses && proposalResponses[i] && proposalResponses[i].code === 2){
+                /*} else if (proposalResponses && proposalResponses[i] && proposalResponses[i].code === 2){
                 if (proposalResponses[i].details && proposalResponses[i].details.indexOf('exists') !== -1) {
                     one_good = true;
                     instantiated = true;
@@ -540,18 +552,23 @@ async function getcontext(channelConfig, clientIdx, txModeFile) {
 
         // an event listener can only register with the peer in its own org
         if(org === userOrg) {
-            let eh = client.newEventHub();
-            eh.setPeerAddr(
-                peerInfo.events,
-                {
-                    pem: Buffer.from(data).toString(),
-                    'ssl-target-name-override': peerInfo['server-hostname'],
-                    //'request-timeout': 120000
-                    'grpc.keepalive_timeout_ms' : 3000, // time to respond to the ping, 3 seconds
-                    'grpc.keepalive_time_ms' : 360000   // time to wait for ping response, 6 minutes
-                    // 'grpc.http2.keepalive_time' : 15
-                }
-            );
+            let eh;
+            if (isChannelEventHub) {
+                eh = channel.newChannelEventHub(peer);
+            } else {
+                eh = client.newEventHub();
+                eh.setPeerAddr(
+                    peerInfo.events,
+                    {
+                        pem: Buffer.from(data).toString(),
+                        'ssl-target-name-override': peerInfo['server-hostname'],
+                        //'request-timeout': 120000
+                        'grpc.keepalive_timeout_ms' : 3000, // time to respond to the ping, 3 seconds
+                        'grpc.keepalive_time_ms' : 360000   // time to wait for ping response, 6 minutes
+                        // 'grpc.http2.keepalive_time' : 15
+                    }
+                );
+            }
             eventhubs.push(eh);
         }
     }

@@ -20,7 +20,6 @@
 const fs = require('fs');
 
 const Client = require('fabric-client');
-const EventHub = require('fabric-client/lib/EventHub.js');
 
 const testUtil = require('./util.js');
 const commUtils = require('../../comm/util');
@@ -29,6 +28,7 @@ const commlogger = commUtils.getLogger('join-channel.js');
 //let the_user = null;
 let tx_id = null;
 let ORGS;
+let isChannelEventHub = false;
 const allEventhubs = [];
 
 /**
@@ -57,6 +57,7 @@ async function joinChannel(org, channelName) {
     const orgName = ORGS[org].name;
 
     const targets = [], eventhubs = [];
+    const eventPromises = [];
 
     const caRootsPath = ORGS.orderer.tls_cacerts;
     let data = fs.readFileSync(commUtils.resolvePath(caRootsPath));
@@ -102,44 +103,47 @@ async function joinChannel(org, channelName) {
                     }
                 )
             );
-            let eh = new EventHub(client);
-            eh.setPeerAddr(
-                ORGS[org][key].events,
-                {
-                    pem: Buffer.from(data).toString(),
-                    'ssl-target-name-override': ORGS[org][key]['server-hostname']
-                }
-            );
-            eh.connect();
-            eventhubs.push(eh);
-            allEventhubs.push(eh);
-        }
-
-        const eventPromises = [];
-        eventhubs.forEach((eh) => {
-            let txPromise = new Promise((resolve, reject) => {
-                let handle = setTimeout(reject, 30000);
-
-                eh.registerBlockEvent((block) => {
-                    clearTimeout(handle);
-
-                    // in real-world situations, a peer may have more than one channel so
-                    // we must check that this block came from the channel we asked the peer to join
-                    if(block.data.data.length === 1) {
-                        // Config block must only contain one transaction
-                        const channel_header = block.data.data[0].payload.header.channel_header;
-                        if (channel_header.channel_id === channelName) {
-                            resolve();
-                        }
-                        else {
-                            reject(new Error('invalid channel name'));
-                        }
+            if (!isChannelEventHub) {
+                const EventHub = require('fabric-client/lib/EventHub.js');
+                let eh = new EventHub(client);
+                eh.setPeerAddr(
+                    ORGS[org][key].events,
+                    {
+                        pem: Buffer.from(data).toString(),
+                        'ssl-target-name-override': ORGS[org][key]['server-hostname']
                     }
-                });
-            });
+                );
+                eh.connect();
+                eventhubs.push(eh);
+                allEventhubs.push(eh);
+            }
+        }
+        if (!isChannelEventHub) {
+            eventhubs.forEach((eh) => {
+                let txPromise = new Promise((resolve, reject) => {
+                    let handle = setTimeout(reject, 30000);
 
-            eventPromises.push(txPromise);
-        });
+                    eh.registerBlockEvent((block) => {
+                        clearTimeout(handle);
+
+                        // in real-world situations, a peer may have more than one channel so
+                        // we must check that this block came from the channel we asked the peer to join
+                        if(block.data.data.length === 1) {
+                        // Config block must only contain one transaction
+                            const channel_header = block.data.data[0].payload.header.channel_header;
+                            if (channel_header.channel_id === channelName) {
+                                resolve();
+                            }
+                            else {
+                                reject(new Error('invalid channel name'));
+                            }
+                        }
+                    });
+                });
+
+                eventPromises.push(txPromise);
+            });
+        }
 
         tx_id = client.newTransactionID();
         request = {
@@ -166,11 +170,15 @@ async function joinChannel(org, channelName) {
 
 module.exports.run = async function (config_path) {
     const fabric = commUtils.parseYaml(config_path).fabric;
+    const info = commUtils.parseYaml(config_path).info;
     let channels = fabric.channel;
     if(!channels || channels.length === 0) {
         return;
     }
     ORGS = fabric.network;
+    if (info.Version === '1.3.0' || info.Version === '1.4.0') {
+        isChannelEventHub = true;
+    }
     commlogger.info('Joining channels...');
 
     try {
